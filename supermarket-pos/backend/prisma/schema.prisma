@@ -1,0 +1,640 @@
+// Supermarket POS — Database Schema (designed in full during Phase 1)
+//
+// Every table from the spec's section 23 is modeled here up front so later
+// phases add services/routes/UI on top of a stable schema instead of
+// reshaping it each time. See docs/ARCHITECTURE.md for the reasoning
+// behind Postgres, UUID keys, and the auth/RBAC design.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Rust-free generator (Prisma ORM 7 default): compiles queries to SQL via a
+// TypeScript/WASM query compiler instead of a downloaded native binary, and
+// talks to Postgres through the @prisma/adapter-pg driver adapter. See
+// docs/ARCHITECTURE.md for why this matters beyond just this sandbox.
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+// ==================== AUTH / RBAC ====================
+
+model Role {
+  id          String           @id @default(uuid())
+  name        String           @unique
+  description String?
+  users       User[]
+  permissions RolePermission[]
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String           @id @default(uuid())
+  key         String           @unique
+  description String?
+  roles       RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model User {
+  id           String    @id @default(uuid())
+  name         String
+  username     String    @unique
+  email        String?   @unique
+  passwordHash String
+  roleId       String
+  role         Role      @relation(fields: [roleId], references: [id])
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  cashierSales       Sale[]              @relation("CashierSales")
+  cashSessions       CashSession[]
+  auditLogs          AuditLog[]
+  expenses           Expense[]
+  refreshTokens      RefreshToken[]
+  heldBills          HeldBill[]
+  inventoryMovements InventoryMovement[]
+
+  @@index([roleId])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  revoked   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// ==================== CATALOG ====================
+
+model Category {
+  id       String     @id @default(uuid())
+  name     String
+  parentId String?
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryTree")
+  taxId    String?
+  tax      Tax?       @relation(fields: [taxId], references: [id])
+  products Product[]
+
+  @@index([parentId])
+  @@map("categories")
+}
+
+model Brand {
+  id       String    @id @default(uuid())
+  name     String    @unique
+  products Product[]
+
+  @@map("brands")
+}
+
+model Unit {
+  id           String    @id @default(uuid())
+  name         String    @unique
+  abbreviation String
+  isFractional Boolean   @default(false)
+  products     Product[]
+
+  @@map("units")
+}
+
+model Supplier {
+  id             String            @id @default(uuid())
+  name           String
+  company        String?
+  phone          String?
+  email          String?
+  address        String?
+  taxId          String?
+  openingBalance Decimal           @default(0) @db.Decimal(14, 2)
+  isActive       Boolean           @default(true)
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  products  Product[]
+  purchases Purchase[]
+  payments  SupplierPayment[]
+
+  @@map("suppliers")
+}
+
+enum ProductStatus {
+  ACTIVE
+  INACTIVE
+  DISCONTINUED
+}
+
+model Product {
+  id         String    @id @default(uuid())
+  name       String
+  sku        String    @unique
+  barcode    String?   @unique
+  categoryId String?
+  category   Category? @relation(fields: [categoryId], references: [id])
+  brandId    String?
+  brand      Brand?    @relation(fields: [brandId], references: [id])
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id])
+  unitId     String
+  unit       Unit      @relation(fields: [unitId], references: [id])
+
+  purchasePrice  Decimal   @db.Decimal(12, 2)
+  sellingPrice   Decimal   @db.Decimal(12, 2)
+  wholesalePrice Decimal?  @db.Decimal(12, 2)
+  taxId          String?
+  tax            Tax?      @relation(fields: [taxId], references: [id])
+  discountId     String?
+  discount       Discount? @relation(fields: [discountId], references: [id])
+
+  currentStock Decimal  @default(0) @db.Decimal(12, 3)
+  minStock     Decimal  @default(0) @db.Decimal(12, 3)
+  maxStock     Decimal? @db.Decimal(12, 3)
+
+  isWeighted  Boolean   @default(false)
+  batchNumber String?
+  expiryDate  DateTime?
+
+  imageUrl    String?
+  description String?
+  location    String?
+  status      ProductStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  saleItems     SaleItem[]
+  purchaseItems PurchaseItem[]
+  movements     InventoryMovement[]
+
+  @@index([categoryId])
+  @@index([status])
+  @@map("products")
+}
+
+// ==================== TAX / DISCOUNT ====================
+
+model Tax {
+  id          String     @id @default(uuid())
+  name        String
+  rate        Decimal    @db.Decimal(5, 2)
+  isInclusive Boolean    @default(false)
+  products    Product[]
+  categories  Category[]
+
+  @@map("taxes")
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+enum DiscountScope {
+  PRODUCT
+  CART
+  CUSTOMER
+}
+
+// Represents a standing discount rule that can be attached to a product
+// (e.g. "10% off this SKU until Friday"). Ad-hoc cart/customer discounts
+// applied at the register are recorded directly as amounts on Sale /
+// SaleItem instead of requiring a Discount row for every one-off case.
+model Discount {
+  id               String        @id @default(uuid())
+  name             String
+  type             DiscountType
+  value            Decimal       @db.Decimal(12, 2)
+  scope            DiscountScope
+  requiresApproval Boolean       @default(false)
+  isActive         Boolean       @default(true)
+  startsAt         DateTime?
+  endsAt           DateTime?
+  products         Product[]
+
+  @@map("discounts")
+}
+
+// ==================== CUSTOMERS ====================
+
+enum CustomerType {
+  WALK_IN
+  REGISTERED
+  CREDIT
+}
+
+model Customer {
+  id            String       @id @default(uuid())
+  name          String
+  phone         String?      @unique
+  email         String?
+  address       String?
+  type          CustomerType @default(WALK_IN)
+  loyaltyPoints Int          @default(0)
+  creditLimit   Decimal      @default(0) @db.Decimal(12, 2)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  sales    Sale[]
+  returns  Return[]
+  payments CustomerPayment[]
+
+  @@index([type])
+  @@map("customers")
+}
+
+// Payments a credit customer makes against their balance. Outstanding
+// balance is never stored — it's computed on read as
+// sum(CREDIT sale payments) − sum(these rows), the same "never store what
+// can drift" pattern used for supplier balances (see docs/ARCHITECTURE.md).
+model CustomerPayment {
+  id         String        @id @default(uuid())
+  customerId String
+  customer   Customer      @relation(fields: [customerId], references: [id])
+  amount     Decimal       @db.Decimal(14, 2)
+  method     PaymentMethod
+  notes      String?
+  createdAt  DateTime      @default(now())
+
+  @@index([customerId])
+  @@map("customer_payments")
+}
+
+// ==================== TERMINALS / SALES / POS ====================
+
+model Terminal {
+  id       String  @id @default(uuid())
+  name     String  @unique
+  location String?
+  isActive Boolean @default(true)
+
+  sales        Sale[]
+  cashSessions CashSession[]
+  heldBills    HeldBill[]
+
+  @@map("terminals")
+}
+
+enum SaleStatus {
+  COMPLETED
+  CANCELLED
+  RETURNED
+  PARTIALLY_RETURNED
+}
+
+model Sale {
+  id            String       @id @default(uuid())
+  invoiceNumber String       @unique
+  customerId    String?
+  customer      Customer?    @relation(fields: [customerId], references: [id])
+  cashierId     String
+  cashier       User         @relation("CashierSales", fields: [cashierId], references: [id])
+  terminalId    String
+  terminal      Terminal     @relation(fields: [terminalId], references: [id])
+  cashSessionId String?
+  cashSession   CashSession? @relation(fields: [cashSessionId], references: [id])
+
+  subtotal       Decimal @db.Decimal(14, 2)
+  discountAmount Decimal @default(0) @db.Decimal(14, 2)
+  taxAmount      Decimal @default(0) @db.Decimal(14, 2)
+  total          Decimal @db.Decimal(14, 2)
+
+  status SaleStatus @default(COMPLETED)
+
+  items    SaleItem[]
+  payments Payment[]
+  returns  Return[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([cashierId])
+  @@index([customerId])
+  @@index([createdAt])
+  @@index([status])
+  @@map("sales")
+}
+
+model SaleItem {
+  id        String  @id @default(uuid())
+  saleId    String
+  sale      Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  quantity  Decimal @db.Decimal(12, 3)
+  unitPrice Decimal @db.Decimal(12, 2)
+  discount  Decimal @default(0) @db.Decimal(12, 2)
+  tax       Decimal @default(0) @db.Decimal(12, 2)
+  subtotal  Decimal @db.Decimal(14, 2)
+
+  returnItems ReturnItem[]
+
+  @@index([saleId])
+  @@index([productId])
+  @@map("sale_items")
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  BANK_TRANSFER
+  MOBILE_WALLET
+  CREDIT
+}
+
+model Payment {
+  id              String        @id @default(uuid())
+  saleId          String
+  sale            Sale          @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  method          PaymentMethod
+  amount          Decimal       @db.Decimal(14, 2)
+  referenceNumber String?
+  createdAt       DateTime      @default(now())
+
+  @@index([saleId])
+  @@map("payments")
+}
+
+// A parked cart. Kept separate from Sale (rather than a Sale with a "held"
+// status) because a held bill isn't a committed transaction yet — its
+// contents, customer, and totals can still change before it's resumed.
+model HeldBill {
+  id         String   @id @default(uuid())
+  terminalId String
+  terminal   Terminal @relation(fields: [terminalId], references: [id])
+  cashierId  String
+  cashier    User     @relation(fields: [cashierId], references: [id])
+  customerId String?
+  cartData   Json
+  note       String?
+  createdAt  DateTime @default(now())
+
+  @@map("held_bills")
+}
+
+// ==================== PURCHASES / SUPPLIERS ====================
+
+enum PurchaseStatus {
+  ORDERED
+  RECEIVED
+  INVOICED
+  PAID
+  CANCELLED
+}
+
+model Purchase {
+  id             String            @id @default(uuid())
+  purchaseNumber String            @unique
+  supplierId     String
+  supplier       Supplier          @relation(fields: [supplierId], references: [id])
+  status         PurchaseStatus    @default(ORDERED)
+  subtotal       Decimal           @db.Decimal(14, 2)
+  taxAmount      Decimal           @default(0) @db.Decimal(14, 2)
+  total          Decimal           @db.Decimal(14, 2)
+  items          PurchaseItem[]
+  payments       SupplierPayment[]
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  receivedAt     DateTime?
+
+  @@index([supplierId])
+  @@index([status])
+  @@map("purchases")
+}
+
+model PurchaseItem {
+  id         String   @id @default(uuid())
+  purchaseId String
+  purchase   Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id])
+  quantity   Decimal  @db.Decimal(12, 3)
+  unitCost   Decimal  @db.Decimal(12, 2)
+  subtotal   Decimal  @db.Decimal(14, 2)
+
+  @@index([purchaseId])
+  @@map("purchase_items")
+}
+
+model SupplierPayment {
+  id         String        @id @default(uuid())
+  supplierId String
+  supplier   Supplier      @relation(fields: [supplierId], references: [id])
+  purchaseId String?
+  purchase   Purchase?     @relation(fields: [purchaseId], references: [id])
+  amount     Decimal       @db.Decimal(14, 2)
+  method     PaymentMethod
+  createdAt  DateTime      @default(now())
+
+  @@map("supplier_payments")
+}
+
+// ==================== INVENTORY ====================
+
+enum MovementType {
+  SALE
+  PURCHASE
+  ADJUSTMENT
+  RETURN
+  DAMAGED
+  EXPIRED
+}
+
+model InventoryMovement {
+  id            String       @id @default(uuid())
+  productId     String
+  product       Product      @relation(fields: [productId], references: [id])
+  type          MovementType
+  quantity      Decimal      @db.Decimal(12, 3)
+  referenceType String?
+  referenceId   String?
+  userId        String?
+  user          User?        @relation(fields: [userId], references: [id])
+  reason        String?
+  createdAt     DateTime     @default(now())
+
+  @@index([productId])
+  @@index([createdAt])
+  @@index([type])
+  @@map("inventory_movements")
+}
+
+// ==================== RETURNS ====================
+
+model Return {
+  id           String       @id @default(uuid())
+  returnNumber String       @unique
+  saleId       String
+  sale         Sale         @relation(fields: [saleId], references: [id])
+  customerId   String?
+  customer     Customer?    @relation(fields: [customerId], references: [id])
+  cashierId    String
+  reason       String?
+  totalRefund  Decimal      @db.Decimal(14, 2)
+  items        ReturnItem[]
+  createdAt    DateTime     @default(now())
+
+  @@index([saleId])
+  @@map("returns")
+}
+
+model ReturnItem {
+  id           String   @id @default(uuid())
+  returnId     String
+  return       Return   @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  saleItemId   String
+  saleItem     SaleItem @relation(fields: [saleItemId], references: [id])
+  quantity     Decimal  @db.Decimal(12, 3)
+  refundAmount Decimal  @db.Decimal(14, 2)
+  reason       String?
+
+  @@map("return_items")
+}
+
+// ==================== EXPENSES ====================
+
+model Expense {
+  id            String        @id @default(uuid())
+  category      String
+  description   String?
+  amount        Decimal       @db.Decimal(14, 2)
+  paymentMethod PaymentMethod
+  date          DateTime      @default(now())
+  employeeId    String?
+  employee      User?         @relation(fields: [employeeId], references: [id])
+  notes         String?
+
+  @@map("expenses")
+}
+
+// ==================== CASH REGISTER ====================
+
+enum SessionStatus {
+  OPEN
+  CLOSED
+}
+
+model CashSession {
+  id           String        @id @default(uuid())
+  terminalId   String
+  terminal     Terminal      @relation(fields: [terminalId], references: [id])
+  cashierId    String
+  cashier      User          @relation(fields: [cashierId], references: [id])
+  openingCash  Decimal       @db.Decimal(14, 2)
+  expectedCash Decimal?      @db.Decimal(14, 2)
+  actualCash   Decimal?      @db.Decimal(14, 2)
+  difference   Decimal?      @db.Decimal(14, 2)
+  status       SessionStatus @default(OPEN)
+  openedAt     DateTime      @default(now())
+  closedAt     DateTime?
+
+  sales     Sale[]
+  movements CashMovement[]
+
+  @@index([cashierId])
+  @@index([status])
+  @@map("cash_sessions")
+}
+
+enum CashMovementType {
+  SALE
+  REFUND
+  EXPENSE
+  CASH_IN
+  CASH_OUT
+}
+
+model CashMovement {
+  id          String           @id @default(uuid())
+  sessionId   String
+  session     CashSession      @relation(fields: [sessionId], references: [id])
+  type        CashMovementType
+  amount      Decimal          @db.Decimal(14, 2)
+  referenceId String?
+  notes       String?
+  createdAt   DateTime         @default(now())
+
+  @@map("cash_movements")
+}
+
+// ==================== AUDIT / SETTINGS / BACKUP ====================
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id])
+  action     String
+  entityType String
+  entityId   String?
+  oldValue   Json?
+  newValue   Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model Setting {
+  id       String @id @default(uuid())
+  key      String @unique
+  value    Json
+  category String
+
+  @@map("settings")
+}
+
+enum BackupType {
+  MANUAL
+  AUTOMATIC
+}
+
+model Backup {
+  id        String     @id @default(uuid())
+  filename  String
+  sizeBytes Int
+  type      BackupType
+  createdBy String?
+  createdAt DateTime   @default(now())
+
+  @@map("backups")
+}
+
+// Generic named sequence (e.g. id="invoice") for human-readable numbers
+// like INV-000001. Incremented via an UPDATE inside the same transaction
+// as the row it numbers, which Postgres naturally serializes at the row
+// level — safe under concurrent sales from multiple terminals without
+// needing explicit locking.
+model Counter {
+  id    String @id
+  value Int    @default(0)
+
+  @@map("counters")
+}
