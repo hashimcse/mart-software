@@ -49,7 +49,7 @@ async function applyStockChange(
       entityType: 'Product',
       entityId: productId,
       newValue: { quantity: delta.toFixed(3), reason, type },
-    });
+    }, tx);
 
     return movement;
   });

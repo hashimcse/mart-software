@@ -10,22 +10,28 @@ interface BalanceInputs {
   openingBalance: Prisma.Decimal;
   purchases: { total: Prisma.Decimal; status: string }[];
   payments: { amount: Prisma.Decimal }[];
+  purchaseReturnsTotal: Prisma.Decimal;
 }
 
 // Balance is always computed from purchases + payments rather than stored
 // as its own column — a stored running balance is one more place for a
 // missed update to quietly drift from reality. Cancelled purchases don't
-// count against the balance since nothing was ever owed for them.
+// count against the balance since nothing was ever owed for them, and
+// items sent back to the supplier (Phase 8) reduce what's owed too.
 function computeBalance(supplier: BalanceInputs) {
   const totalPurchases = supplier.purchases
     .filter((p) => p.status !== 'CANCELLED')
     .reduce((sum, p) => sum.add(p.total), new Prisma.Decimal(0));
   const totalPaid = supplier.payments.reduce((sum, p) => sum.add(p.amount), new Prisma.Decimal(0));
-  const outstandingBalance = supplier.openingBalance.add(totalPurchases).sub(totalPaid);
+  const outstandingBalance = supplier.openingBalance
+    .add(totalPurchases)
+    .sub(supplier.purchaseReturnsTotal)
+    .sub(totalPaid);
 
   return {
     openingBalance: supplier.openingBalance.toFixed(2),
     totalPurchases: totalPurchases.toFixed(2),
+    totalReturned: supplier.purchaseReturnsTotal.toFixed(2),
     totalPaid: totalPaid.toFixed(2),
     outstandingBalance: outstandingBalance.toFixed(2),
   };
@@ -60,9 +66,25 @@ export async function listSuppliers(query: ListSuppliersQuery) {
     prisma.supplier.count({ where }),
   ]);
 
+  const supplierIds = rows.map((s) => s.id);
+  const purchaseReturns = await prisma.purchaseReturn.findMany({
+    where: { purchase: { supplierId: { in: supplierIds } } },
+    select: { totalAmount: true, purchase: { select: { supplierId: true } } },
+  });
+  const returnsBySupplier = new Map<string, Prisma.Decimal>();
+  for (const pr of purchaseReturns) {
+    const sid = pr.purchase.supplierId;
+    returnsBySupplier.set(sid, (returnsBySupplier.get(sid) ?? new Prisma.Decimal(0)).add(pr.totalAmount));
+  }
+
   const items = rows.map(({ purchases, payments, ...supplier }) => ({
     ...supplier,
-    balance: computeBalance({ openingBalance: supplier.openingBalance, purchases, payments }),
+    balance: computeBalance({
+      openingBalance: supplier.openingBalance,
+      purchases,
+      payments,
+      purchaseReturnsTotal: returnsBySupplier.get(supplier.id) ?? new Prisma.Decimal(0),
+    }),
   }));
 
   return toPaginatedResult(items, total, page, pageSize);
@@ -78,7 +100,20 @@ export async function getSupplierById(id: string) {
   });
   if (!supplier) throw new NotFoundError('Supplier not found');
 
-  return { ...supplier, balance: computeBalance(supplier) };
+  const purchaseReturnsAgg = await prisma.purchaseReturn.aggregate({
+    where: { purchase: { supplierId: id } },
+    _sum: { totalAmount: true },
+  });
+
+  return {
+    ...supplier,
+    balance: computeBalance({
+      openingBalance: supplier.openingBalance,
+      purchases: supplier.purchases,
+      payments: supplier.payments,
+      purchaseReturnsTotal: purchaseReturnsAgg._sum.totalAmount ?? new Prisma.Decimal(0),
+    }),
+  };
 }
 
 export async function createSupplier(input: CreateSupplierInput, actingUserId: string) {

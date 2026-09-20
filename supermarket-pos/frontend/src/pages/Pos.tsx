@@ -18,6 +18,8 @@ import { CartSummary, PaymentLine } from '../components/pos/CartSummary';
 import { CustomerPicker } from '../components/pos/CustomerPicker';
 import { HeldBillsPanel } from '../components/pos/HeldBillsPanel';
 import { SaleCompleteModal } from '../components/pos/SaleCompleteModal';
+import { ReturnFormModal } from '../components/pos/ReturnFormModal';
+import { CashRegisterPanel } from '../components/register/CashRegisterPanel';
 import type { Product } from '../types/catalog';
 import type { CartLine, Customer, HeldBill as HeldBillType, SaleResult, Settings, Terminal } from '../types/pos';
 
@@ -38,11 +40,15 @@ export default function Pos() {
   const [showHeldBills, setShowHeldBills] = useState(false);
   const [recentSales, setRecentSales] = useState<SaleResult[]>([]);
   const [showRecentSales, setShowRecentSales] = useState(false);
+  const [showRegister, setShowRegister] = useState(false);
   const [settings, setSettings] = useState<Settings>({});
   const [completed, setCompleted] = useState<{ sale: SaleResult; changeDue: string; loyaltyPointsEarned: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [printingRowId, setPrintingRowId] = useState<string | null>(null);
+  const [returningSaleId, setReturningSaleId] = useState<string | null>(null);
+  const [returnMessage, setReturnMessage] = useState<string | null>(null);
+  const canProcessReturns = hasPermission('refunds.process');
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const firstPaymentInputRef = useRef<HTMLInputElement>(null);
@@ -255,10 +261,22 @@ export default function Pos() {
           )}
         </div>
         <div className="flex items-center gap-4 text-sm">
-          <button onClick={() => setShowHeldBills((v) => !v)} className="font-medium text-ink/60 hover:text-ink">
+          <button
+            onClick={() => { setShowRegister((v) => !v); setShowHeldBills(false); setShowRecentSales(false); }}
+            className="font-medium text-ink/60 hover:text-ink"
+          >
+            Cash register
+          </button>
+          <button
+            onClick={() => { setShowHeldBills((v) => !v); setShowRegister(false); setShowRecentSales(false); }}
+            className="font-medium text-ink/60 hover:text-ink"
+          >
             Held bills {heldBills.length > 0 && `(${heldBills.length})`}
           </button>
-          <button onClick={() => setShowRecentSales((v) => !v)} className="font-medium text-ink/60 hover:text-ink">
+          <button
+            onClick={() => { setShowRecentSales((v) => !v); setShowRegister(false); setShowHeldBills(false); }}
+            className="font-medium text-ink/60 hover:text-ink"
+          >
             Recent sales
           </button>
         </div>
@@ -302,6 +320,10 @@ export default function Pos() {
         </div>
       </div>
 
+      {showRegister && terminalId && (
+        <CashRegisterPanel terminalId={terminalId} onClose={() => setShowRegister(false)} />
+      )}
+
       {showHeldBills && (
         <div className="absolute inset-x-0 bottom-0 z-20 max-h-80 overflow-y-auto border-t border-ink/10 bg-white shadow-2xl">
           <div className="flex items-center justify-between border-b border-ink/10 px-4 py-2">
@@ -328,14 +350,29 @@ export default function Pos() {
               <div key={s.id} className="flex items-center justify-between px-4 py-2 text-sm">
                 <span className="figure text-ink">{s.invoiceNumber}</span>
                 <span className="text-ink/50">{new Date(s.createdAt).toLocaleTimeString()}</span>
+                {s.status !== 'COMPLETED' && (
+                  <span className="rounded-full bg-brass-50 px-2 py-0.5 text-xs font-medium text-brass-600">
+                    {s.status === 'RETURNED' ? 'Returned' : 'Partially returned'}
+                  </span>
+                )}
                 <span className="figure font-medium text-ink">{Number(s.total).toFixed(2)}</span>
-                <button
-                  onClick={() => handlePrintRecent(s.id)}
-                  disabled={printingRowId === s.id}
-                  className="text-xs font-medium text-ledger-600 hover:text-ledger-700 disabled:opacity-50"
-                >
-                  {printingRowId === s.id ? 'Printing…' : 'Print'}
-                </button>
+                <div className="flex gap-3">
+                  {canProcessReturns && s.status !== 'RETURNED' && (
+                    <button
+                      onClick={() => setReturningSaleId(s.id)}
+                      className="text-xs font-medium text-ink/50 hover:text-brick-600"
+                    >
+                      Return
+                    </button>
+                  )}
+                  <button
+                    onClick={() => handlePrintRecent(s.id)}
+                    disabled={printingRowId === s.id}
+                    className="text-xs font-medium text-ledger-600 hover:text-ledger-700 disabled:opacity-50"
+                  >
+                    {printingRowId === s.id ? 'Printing…' : 'Print'}
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -350,6 +387,25 @@ export default function Pos() {
           printerMode={settings['pos.printerMode'] ?? 'browser'}
           onClose={() => setCompleted(null)}
         />
+      )}
+
+      {returningSaleId && (
+        <ReturnFormModal
+          saleId={returningSaleId}
+          onClose={() => setReturningSaleId(null)}
+          onCompleted={(refundAmount) => {
+            setReturningSaleId(null);
+            setReturnMessage(`Return processed — refund ${Number(refundAmount).toFixed(2)}`);
+            refreshRecentSales();
+            setTimeout(() => setReturnMessage(null), 5000);
+          }}
+        />
+      )}
+
+      {returnMessage && (
+        <div className="absolute bottom-4 right-4 z-30 rounded-md bg-ledger-600 px-4 py-2 text-sm font-medium text-white shadow-lg">
+          {returnMessage}
+        </div>
       )}
     </div>
   );

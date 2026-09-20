@@ -2,9 +2,11 @@ import { FormEvent, useEffect, useState } from 'react';
 import { Modal } from '../ui/Modal';
 import { StatusBadge } from '../ui/StatusBadge';
 import { fetchPurchase, receivePurchase, invoicePurchase, cancelPurchase, recordSupplierPayment } from '../../lib/purchasingApi';
+import { fetchPurchaseReturnableLines, createPurchaseReturn } from '../../lib/returnApi';
 import { ApiError } from '../../lib/api';
 import type { PaymentMethod } from '../../types/pos';
 import type { Purchase } from '../../types/purchasing';
+import type { PurchaseReturnableLine } from '../../types/returns';
 
 interface Props {
   purchaseId: string;
@@ -13,6 +15,7 @@ interface Props {
 }
 
 const PAYMENT_METHODS: PaymentMethod[] = ['CASH', 'CARD', 'BANK_TRANSFER', 'MOBILE_WALLET', 'CREDIT'];
+const RECEIVABLE_STATUSES = ['RECEIVED', 'INVOICED', 'PAID'];
 
 export function PurchaseDetailModal({ purchaseId, onClose, onChanged }: Props) {
   const [purchase, setPurchase] = useState<Purchase | null>(null);
@@ -20,6 +23,11 @@ export function PurchaseDetailModal({ purchaseId, onClose, onChanged }: Props) {
   const [isActing, setIsActing] = useState(false);
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState<PaymentMethod>('CASH');
+
+  const [showReturnForm, setShowReturnForm] = useState(false);
+  const [returnLines, setReturnLines] = useState<PurchaseReturnableLine[]>([]);
+  const [returnQuantities, setReturnQuantities] = useState<Record<string, string>>({});
+  const [returnReason, setReturnReason] = useState('');
 
   function load() {
     fetchPurchase(purchaseId).then(setPurchase).catch(() => setError('Could not load this purchase order'));
@@ -53,6 +61,44 @@ export function PurchaseDetailModal({ purchaseId, onClose, onChanged }: Props) {
       onChanged();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not record this payment');
+    } finally {
+      setIsActing(false);
+    }
+  }
+
+  async function openReturnForm() {
+    setShowReturnForm(true);
+    setError(null);
+    try {
+      const data = await fetchPurchaseReturnableLines(purchaseId);
+      setReturnLines(data.lines);
+      const initial: Record<string, string> = {};
+      for (const l of data.lines) initial[l.purchaseItemId] = '0';
+      setReturnQuantities(initial);
+    } catch {
+      setError('Could not load returnable items');
+    }
+  }
+
+  async function handlePurchaseReturn(e: FormEvent) {
+    e.preventDefault();
+    const items = Object.entries(returnQuantities)
+      .filter(([, qty]) => Number(qty) > 0)
+      .map(([purchaseItemId, quantity]) => ({ purchaseItemId, quantity }));
+    if (items.length === 0) {
+      setError('Enter a quantity for at least one item.');
+      return;
+    }
+    setError(null);
+    setIsActing(true);
+    try {
+      await createPurchaseReturn(purchaseId, { items, reason: returnReason || undefined });
+      setShowReturnForm(false);
+      setReturnReason('');
+      load();
+      onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not process this return');
     } finally {
       setIsActing(false);
     }
@@ -142,10 +188,71 @@ export function PurchaseDetailModal({ purchaseId, onClose, onChanged }: Props) {
             Mark invoiced
           </button>
         )}
+        {RECEIVABLE_STATUSES.includes(purchase.status) && !showReturnForm && (
+          <button
+            onClick={openReturnForm}
+            disabled={isActing}
+            className="rounded-md border border-ink/15 px-3 py-2 text-sm font-medium text-ink/70 hover:bg-paper disabled:opacity-50"
+          >
+            Return items to supplier
+          </button>
+        )}
         {(purchase.status === 'RECEIVED' || purchase.status === 'INVOICED') && remaining === 0 && (
           <span className="rounded-md bg-ledger-50 px-3 py-2 text-sm font-medium text-ledger-700">Fully paid</span>
         )}
       </div>
+
+      {showReturnForm && (
+        <form onSubmit={handlePurchaseReturn} className="mb-4 space-y-3 border-t border-ink/10 pt-4">
+          <table className="w-full text-left text-sm">
+            <thead className="text-xs uppercase tracking-wide text-ink/40">
+              <tr>
+                <th className="py-1 font-medium">Item</th>
+                <th className="py-1 text-right font-medium">Returnable</th>
+                <th className="py-1 text-right font-medium">Qty</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-ink/5">
+              {returnLines.map((l) => (
+                <tr key={l.purchaseItemId}>
+                  <td className="py-1.5 text-ink">{l.productName}</td>
+                  <td className="figure py-1.5 text-right text-ink/60">{l.returnable}</td>
+                  <td className="py-1.5 text-right">
+                    <input
+                      value={returnQuantities[l.purchaseItemId] ?? '0'}
+                      onChange={(e) => setReturnQuantities((q) => ({ ...q, [l.purchaseItemId]: e.target.value }))}
+                      disabled={Number(l.returnable) <= 0}
+                      className="figure w-16 rounded border border-ink/15 py-1 text-right text-sm disabled:bg-paper disabled:text-ink/30"
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <input
+            value={returnReason}
+            onChange={(e) => setReturnReason(e.target.value)}
+            placeholder="Reason (e.g. damaged on arrival, wrong item)"
+            className="w-full rounded-md border border-ink/15 px-3 py-2 text-sm"
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setShowReturnForm(false)}
+              className="rounded-md border border-ink/15 px-3 py-2 text-sm font-medium text-ink/70 hover:bg-paper"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={isActing}
+              className="rounded-md bg-ledger-600 px-3 py-2 text-sm font-semibold text-white hover:bg-ledger-700 disabled:opacity-50"
+            >
+              Confirm return
+            </button>
+          </div>
+        </form>
+      )}
 
       {purchase.status !== 'CANCELLED' && remaining > 0 && (
         <form onSubmit={handlePayment} className="flex items-end gap-2 border-t border-ink/10 pt-4">

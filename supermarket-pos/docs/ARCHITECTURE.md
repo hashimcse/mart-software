@@ -1,121 +1,33 @@
-# Architecture — Phase 1
+# Architecture — current release
 
-## Layout
+React/TypeScript/Vite frontend → Express/TypeScript API → Prisma 7 + pg adapter → PostgreSQL. In production Express also serves the built frontend, so the default API URL is /api. Development can use separate Vite/API origins.
 
-```
-supermarket-pos/
-  backend/          Express + TypeScript API
-    prisma/         schema.prisma (single source of truth for the DB) + seed script
-    scripts/        verify-auth-primitives.ts — no-DB smoke test for the crypto layer
-    src/
-      config/       env loading, Prisma client singleton
-      controllers/  thin HTTP handlers
-      services/     business logic (this is what later phases extend)
-      middleware/   auth, permission checks, validation, error handling
-      routes/       Express routers, one file per resource
-      schemas/      zod request validation
-      utils/        errors, jwt, password hashing, logging
-      generated/    Prisma's generated client (created by `prisma generate`, gitignored)
-  frontend/         React + TypeScript + Tailwind (Vite)
-    src/
-      pages/        route-level screens
-      components/   shared UI (layout shell, route guards)
-      context/      auth state
-      lib/          API client with automatic token refresh
-  docs/             this file, ROADMAP.md
-```
+## Persistence and build
 
-Frontend → REST API (`/api/...`) → services → Prisma → PostgreSQL. Controllers don't contain business logic; they parse the request, call a service, and shape the response. That's what section 35 of the spec asks for, and it's what lets Phase 2+ add modules without touching auth code.
+Prisma datasource configuration is in backend/prisma.config.ts. The prisma-client-js generator emits a CommonJS-compatible client into src/generated/prisma; the pg adapter keeps database queries on the JavaScript driver. Generation still needs Prisma's schema tooling. The initial migration contains the complete schema. Never replay it on an existing unbaselined Phase 9 database.
 
-## Why Postgres over SQLite
+UUID keys and PostgreSQL Decimal columns are retained. Transaction data is authoritative; customer/supplier balances are computed. Product.currentStock is a guarded, transactionally maintained balance. SaleItem.unitCost is nullable only to represent unavailable historical costs. ReturnItem.restock records whether a return reverses COGS.
 
-The spec asks for decimal-safe money math. Prisma's `Decimal` type maps to a real fixed-point `numeric` column on Postgres. SQLite has no native decimal type, so Prisma would silently store money as floating point there — exactly what section 29 says not to do. Postgres is the only one of the two options that satisfies that requirement, so it's the default here rather than a "for production" afterthought. A single-computer/no-server deployment would need a dedicated SQLite variant that stores money as integer minor units (cents) instead of Decimal — worth its own pass rather than a quick swap.
+## Transactions
 
-## Why Express over FastAPI
+Sales validate payment coverage and permissions, snapshot costs, deduct stock, create payments/inventory/cash movements and audit records in one transaction. Decimal values are rounded to cents before monetary persistence. Row locks on terminals serialize drawer changes with close-out; guarded product updates prevent negative stock. Returns lock the sale before checking all prior returned quantities. Purchase receiving/returns lock the purchase before transitions or return caps. Cash open/close/manual moves and cash-linked expenses share the terminal locking convention.
 
-Both were offered in the spec. Express/TypeScript was chosen so the whole stack — frontend and backend — shares one language and one set of types, which matters more than usual here because cart totals, tax and discount math need to match exactly between client-side preview and server-side authority.
+The audit helper accepts a transaction client. Do not substitute a global client for an audit write inside a business transaction. For cross-terminal operations, PostgreSQL may reject a deadlock/serialization conflict; clients receive a conflict/error and must retry after reviewing state.
 
-## Why Prisma 7 (Rust-free) instead of the classic Prisma engine
+## Reports
 
-Prisma historically shipped a native Rust query engine binary, downloaded per-platform from Prisma's own CDN the first time you ran `prisma generate`. Prisma ORM 7 (current as of 2026) replaced that with a TypeScript/WASM query compiler plus a driver adapter (`@prisma/adapter-pg` here) that talks to Postgres through the plain `pg` driver — no native binary, ~90% smaller client bundle, and no per-platform binary compatibility question. That last point matters concretely for this project: section 21 asks for multiple POS terminals on a local network, which in a lot of real stores means a mix of Windows machines. Not depending on a compiled-per-OS binary removes a real class of "works on my machine" deployment failure.
+report.service.ts validates UTC inclusive day ranges, uses a repeatable-read transaction, and bounds rows/time range. Sales groupings include day, Monday-start week, month, cashier, product, category, customer and payment method. Original sale values and period refunds are distinct. Product/cart allocations reconcile to each sale total. Financial amounts exclude proportional net tax, include expenses and snapshot COGS, and withhold profit when a contributing historic cost is missing. Inventory data is current and cost fields require profits.view.
 
-## IDs
+CSV cells escape quotes and neutralize leading spreadsheet-formula characters. XLSX cells are literal strings, preserving exact decimal text. PDFKit produces actual PDF files. Report text and tables render via React text nodes, not HTML injection.
 
-All primary keys are UUIDs generated by the application layer (via Prisma's `@default(uuid())`), not database auto-increment integers. That means any POS terminal can generate a valid ID for a new row before it's ever synced to the central database — which section 22 (offline resilience) will need.
+## Backup and recovery
 
-## Auth model
+backup.service.ts shells out without a shell using explicit argument arrays and PostgreSQL environment variables. Passwords are not placed in command arguments. Backups live outside public assets. A UUID restricts downloadable filenames; checksum validation precedes download/restore. A matching uploads directory and status manifest accompany each archive. Failures are surfaced in the history/logs.
 
-- Passwords hashed with `bcryptjs` (pure JS, no native build step — again relevant if a terminal is a Windows machine without build tools installed).
-- Login issues a short-lived JWT access token (15 min default) carrying the user's role and permission keys, plus a long-lived, rotating, DB-backed refresh token (7 days default). Refresh tokens are stored hashed (SHA-256) and revoked on each use (rotation) and on logout.
-- Permissions are embedded in the access token at issue time rather than re-queried on every request, keeping the hot path (`authenticate` middleware) to a JWT signature check only — no DB round trip per request. Tradeoff: a permission change takes up to one access-token lifetime (15 min) to propagate. That's deliberate: POS request latency (section 26) matters more here than instant permission propagation.
-- Roles and permissions are database rows (`roles`, `permissions`, `role_permissions`), not hardcoded enums, so an admin UI can manage them later without a migration.
-- Every login, failed login, and user account change writes an `audit_logs` row.
+The process-local scheduler checks once a minute and catches up on startup; the deployment uses one API instance. A restore always stages a new database. Live database switching is an administrator operation after validation. See DEPLOYMENT.md for consistency, storage and retention limits.
 
-## What's deliberately NOT in Phase 1
+## Auth and hardening
 
-Product/inventory/sales endpoints, the actual POS screen, printing, and reports all come in later phases per the roadmap. The schema for all of them already exists — Phase 1 just doesn't expose routes/UI for them yet, to avoid shipping untested surface area.
+JWT access tokens hold role/permissions for their short lifetime. Refresh tokens are stored hashed and claimed atomically on rotation; deactivated accounts cannot log in or refresh. Login performs bcrypt work for unknown users as well. Global/auth/backup rate limits, strict report/settings validation, response error normalization and secret validation supplement existing Helmet/CORS/upload controls. Staff deactivation never returns password hashes. SessionStorage token storage and delayed permission revocation remain explicit deployment tradeoffs.
 
-## Money and quantities are strings on the wire, not JSON numbers
-
-JSON has no native decimal type — a price sent as the JSON number `12.99` has already been through JS's binary floating-point parser by the time Express sees it, before any of our own code runs. So every money or quantity field (`sellingPrice`, `quantity`, `discount`, `amountReceived`, ...) is validated by zod as a regex-matched **string** (`"12.99"`, `"0.5"`) and passed straight into `Prisma.Decimal` server-side. Nothing in the request path ever parses a price through `Number`. The one exception is the frontend's live cart preview (subtotal/tax/total shown while scanning) — that's plain floating point for responsiveness, explicitly commented as preview-only in `lib/cartMath.ts`, and it's never what gets submitted or stored. The backend's `Prisma.Decimal` math in `sale.service.ts` is the only authoritative calculation, and its result is what comes back in the API response.
-
-## Sale creation is one atomic transaction
-
-`POST /api/sales` (Phase 3) runs entirely inside `prisma.$transaction`: validate terminal/customer/products → compute line and cart totals → check discount authorization → deduct stock → create the Sale/SaleItems/Payment rows → write inventory movement rows → audit log. If anything fails partway, Postgres rolls back the whole thing — there's no state where a sale is charged but stock wasn't deducted, or vice versa (spec section 22's "use database transactions for sale creation + inventory update + payment recording").
-
-Stock deduction specifically uses a guarded conditional update rather than read-then-write:
-```
-UPDATE products SET current_stock = current_stock - :qty
-WHERE id = :id AND current_stock >= :qty
-```
-via `prisma.product.updateMany({ where: { id, currentStock: { gte: qty } }, data: { currentStock: { decrement: qty } } })`. This makes it structurally impossible for stock to go negative from a sale, and Postgres's row lock on the UPDATE serializes two terminals racing to sell the last unit of the same product correctly — the second one simply sees `count: 0` and gets a clean "insufficient stock" error instead of a race condition. No explicit `SELECT ... FOR UPDATE` locking needed.
-
-## Printing: two real paths, not one fake button
-
-The spec is explicit that a web app without a native printing bridge should either use browser printing or a desktop bridge (Electron/Tauri), and should never ship a print button that doesn't actually print. This is a plain React SPA, not a desktop shell, so both supported paths are things that genuinely work from a browser/Node backend without extra infrastructure:
-
-- **Browser printing** (`frontend/src/lib/receiptPrint.ts`) opens an isolated window, writes a receipt formatted to the exact character width for 58mm (32 cols) or 80mm (48 cols) paper, and calls the browser's real print dialog. This covers the common case: a thermal printer installed as a normal system printer, which is most of them — either via a manufacturer driver or the OS's generic/text-only driver.
-- **Network ESC/POS printing** (`backend/src/utils/escpos.ts` + `services/printer.service.ts`) generates real ESC/POS command bytes (init, align, bold, cut — the documented Epson command set most thermal printers, including clones, implement) and sends them over a raw TCP socket to the printer's IP on port 9100, the near-universal "raw printing" port for network thermal printers. No SDK, no bridge process.
-- **Raw file download** (`GET /sales/:id/receipt.escpos`) hands back the same bytes as a binary file, for USB-only printers on Linux where `cat receipt.escpos > /dev/usb/lp0` is a normal way to print — useful if the backend runs on the same machine the printer is plugged into.
-
-All three were verified for real during this build (see below) — not just read for plausibility.
-
-## Split payments and the cash "applied vs. tendered" distinction
-
-`Payment.amount` always sums to exactly `Sale.total` — a clean invariant for reporting later. For cash specifically, the cashier can tender more than what's owed (spec's own example plus real life), and the excess becomes change rather than an inflated payment row. `sale.service.ts`'s `createSale` accepts an array of `{ method, amount }` payments: non-cash lines are charged exactly as stated (a card doesn't hand back change), at most one cash line is allowed, and it covers whatever's left after non-cash payments — potentially more, producing `changeDue` in the response. Phase 9's cash-drawer reconciliation will need the *tendered* amount too (to know how much cash physically went into the drawer before change came back out), which is a separate concept layered on top rather than something `Payment.amount` should be overloaded to carry.
-
-## Inventory: one guarded-update pattern, three callers
-
-Stock adjustments, damaged write-offs, and expired write-offs all funnel through the same `applyStockChange` helper in `inventory.service.ts` that sales use: negative changes go through the race-safe `UPDATE ... WHERE currentStock >= amount` guard (so a stock count correction can't be applied twice and go negative any more than two terminals selling the last unit can), positive changes are a plain increment. One helper, one set of guarantees, three call sites — rather than three separate implementations that could quietly drift apart. Low-stock and valuation calculations happen in application code rather than SQL because Prisma can't compare two columns of the same row (`currentStock <= minStock`) in a `where` filter; noted in the code as worth revisiting with a raw query if the catalog ever grows large enough for that to matter.
-
-## Purchases: stock moves on receipt, not on order
-
-Creating a purchase order records intent — it never touches `currentStock`. Only `POST /purchases/:id/receive` does, matching the spec's own workflow (Supplier → PO → Receive Stock → Inventory Updated → Invoice → Payment) and reality: you don't have the goods until they arrive, no matter what the PO says. Because of that, cancellation is only allowed while a PO is still `ORDERED` — cancelling something already received would mean reversing real inventory movements, which is what a purchase return is for, not a cancellation. That's flagged in `docs/ROADMAP.md` as deferred rather than half-implemented as a side effect of cancel.
-
-Supplier `outstandingBalance` is never a stored column — it's computed on every read from `openingBalance + sum(non-cancelled purchase totals) − sum(payments)`. A stored running balance is one more place for a missed update (a cancelled purchase, a partial refund, anything) to quietly drift from what the ledger actually says. A purchase auto-transitions to `PAID` once its payments cover its total, but only once it's actually `RECEIVED` or `INVOICED` — prepaying an order that hasn't arrived yet shouldn't silently mark it as fully settled.
-
-## Customers: the same computed-balance pattern, and a deliberate loyalty scope call
-
-Customer credit balance follows the exact same principle as supplier balance (Phase 6): never stored, always computed from `sum(CREDIT-method sale payments) − sum(customer payments)`. It's the same reasoning — a stored running balance is one more place a missed update can drift from what the transaction history actually says.
-
-Loyalty points accrue automatically at checkout (inside the same sale transaction, so a sale and its points are atomic together), but *redemption* is handled through the same manual "adjust points" endpoint as a goodwill bonus or correction would be — there's no one-click "redeem points as a cart discount" in the POS screen itself. That's a deliberate scope call, not an oversight: wiring redemption into checkout would mean deciding how it interacts with the existing discount-authorization system (is redeeming 500 points worth Rs 500 a "large discount" requiring `discounts.apply_large`? probably, but that needs its own design pass, not a rushed one bolted onto this phase). A manual adjustment is real, working functionality today — a cashier processes the redemption as a discount at checkout, then deducts the points on the customer record — just not the more polished single-click flow a later pass could add.
-
-## Verification status — read this before assuming something works
-
-Being specific about what was actually checked, rather than a blanket "it's tested":
-
-**Frontend — fully verified.** `npm install`, `tsc --noEmit`, and `vite build` all run clean with no errors, across all seven phases built so far. The login flow, token-refresh-on-401 logic, protected routing, product search/pagination/image-upload, the POS cart/checkout/hold-resume flow, split-payment entry, Settings, Inventory, Purchases/Suppliers, and Customers/loyalty are real code exercised by the type checker and bundler, not mocked. The cart's live tax-preview math (`lib/cartMath.ts`) was additionally run standalone against hand-computed expected values to confirm it agrees with the backend's formula.
-
-**Backend — verified except one step that depends on your machine's internet access.** `npm install` succeeds at every phase. Several things were run for real, not just compiled, entirely independent of the database (so this sandbox's one Prisma limitation, below, doesn't block them):
-- `npm run verify:auth` — signs/verifies JWTs, hashes/checks passwords, rejects tampered tokens.
-- The ESC/POS builder — checked byte-for-byte against the actual documented command sequences, and a full receipt sent over a real local TCP socket to confirm the bytes arrive unmodified; the printer error path (refused/timed-out connection) verified to fail cleanly.
-- The split-payment resolution logic — checked against 11 scenarios using the same Decimal library Prisma wraps.
-- The low-stock threshold filter and stock valuation math — checked against 8 scenarios including the exactly-at-threshold boundary, zero-stock exclusion, fractional (weighted-item) quantities, and hand-computed cost/retail/profit totals.
-- The supplier balance computation and purchase auto-PAID transition — checked against 8 scenarios including a cancelled purchase correctly excluded from the balance, an overpayment correctly producing a credit balance, and a payment one cent short correctly *not* triggering PAID.
-- The loyalty point accrual formula and customer balance computation — checked against 12 scenarios including truncation (999.99 spent earns 9 points, not 10), a zero-total sale earning nothing, and the negative-balance guard on point deduction.
-
-Where I could **not** get a clean result in this sandbox: `npx prisma generate` needs to download a schema-parsing binary from `binaries.prisma.sh`, and that domain isn't reachable from this sandboxed build environment's network allowlist — confirmed this holds even for Prisma ORM 7's Rust-free architecture, since the *schema* engine (codegen/migrations) is separate from the *query* engine that moved to WASM. Every `tsc` error in the backend traces directly to that one missing step: a "cannot find module" for the not-yet-generated client, plus downstream `implicit any`/`{}` types that resolve once that module exists (a documented quirk of how TypeScript's generic inference degrades through something like `new Map(items.map(...))` when the upstream type is unresolved — checked that this pattern held for every new error introduced in each phase rather than assumed). On a normal machine with regular internet access, `npx prisma generate` completes in a few seconds and every one of those errors disappears.
-
-**What actually caught real bugs during this build:** a TypeScript structural-typing mismatch in the pagination helper (Phase 2), a deprecated/vulnerable multer 1.x dependency and a react-router-dom advisory (Phase 2) — all fixed in the current `package.json` files. Phases 3 through 7 introduced no new backend type errors beyond the established cascade.
-
-**What this means for you:** run the setup steps in the root README in order. The very first backend step is `npx prisma generate`, specifically so you hit this early rather than after writing new code against a client that was never generated.
+Dependency lockfiles include tested transitive overrides for deepmerge-ts, mysql2 and uuid. Vite was upgraded; the deprecated ts-node-dev runner was replaced with tsx. See VERIFICATION.md for current audit and test results rather than relying on historical claims.

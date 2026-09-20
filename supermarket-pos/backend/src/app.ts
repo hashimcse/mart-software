@@ -1,4 +1,5 @@
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
@@ -11,6 +12,9 @@ import { NotFoundError } from './utils/errors';
 export function createApp() {
   const app = express();
 
+  app.disable('x-powered-by');
+  app.set('query parser', 'simple');
+  app.use('/api', rateLimit({windowMs:60000,limit:1200,standardHeaders:'draft-7',legacyHeaders:false}));
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
   app.use(cors({ origin: env.corsOrigin, credentials: true }));
   app.use(express.json({ limit: '2mb' }));
@@ -18,6 +22,11 @@ export function createApp() {
 
   app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
   app.use('/api', routes);
+  if (env.nodeEnv === 'production') {
+    const frontend = path.resolve(__dirname, '../../frontend/dist');
+    app.use(express.static(frontend));
+    app.get('*', (req, res, next) => req.path.startsWith('/api/') ? next() : res.sendFile(path.join(frontend, 'index.html')));
+  }
 
   app.use((_req, _res, next) => next(new NotFoundError('Route not found')));
   app.use(errorMiddleware);

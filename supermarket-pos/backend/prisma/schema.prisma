@@ -7,7 +7,6 @@
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 // Rust-free generator (Prisma ORM 7 default): compiles queries to SQL via a
@@ -15,7 +14,7 @@ datasource db {
 // talks to Postgres through the @prisma/adapter-pg driver adapter. See
 // docs/ARCHITECTURE.md for why this matters beyond just this sandbox.
 generator client {
-  provider = "prisma-client"
+  provider = "prisma-client-js"
   output   = "../src/generated/prisma"
 }
 
@@ -260,6 +259,7 @@ model Customer {
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 
+  heldBills HeldBill[]
   sales    Sale[]
   returns  Return[]
   payments CustomerPayment[]
@@ -348,6 +348,7 @@ model SaleItem {
   product   Product @relation(fields: [productId], references: [id])
   quantity  Decimal @db.Decimal(12, 3)
   unitPrice Decimal @db.Decimal(12, 2)
+  unitCost Decimal? @db.Decimal(12, 2) // Null only for sales imported before Phase 10
   discount  Decimal @default(0) @db.Decimal(12, 2)
   tax       Decimal @default(0) @db.Decimal(12, 2)
   subtotal  Decimal @db.Decimal(14, 2)
@@ -391,6 +392,7 @@ model HeldBill {
   cashier    User     @relation(fields: [cashierId], references: [id])
   customerId String?
   cartData   Json
+  customer   Customer? @relation(fields: [customerId], references: [id])
   note       String?
   createdAt  DateTime @default(now())
 
@@ -418,6 +420,7 @@ model Purchase {
   total          Decimal           @db.Decimal(14, 2)
   items          PurchaseItem[]
   payments       SupplierPayment[]
+  returns        PurchaseReturn[]
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
   receivedAt     DateTime?
@@ -437,8 +440,40 @@ model PurchaseItem {
   unitCost   Decimal  @db.Decimal(12, 2)
   subtotal   Decimal  @db.Decimal(14, 2)
 
+  returnItems PurchaseReturnItem[]
+
   @@index([purchaseId])
   @@map("purchase_items")
+}
+
+// Sending received stock back to a supplier — deferred from Phase 6 since
+// cancelling a purchase only covers the not-yet-received case. Always
+// removes stock (unlike a sale return, there's no "keep it, don't restock"
+// option here — the goods are physically leaving the store either way).
+model PurchaseReturn {
+  id           String               @id @default(uuid())
+  returnNumber String               @unique
+  purchaseId   String
+  purchase     Purchase             @relation(fields: [purchaseId], references: [id])
+  reason       String?
+  totalAmount  Decimal              @db.Decimal(14, 2)
+  items        PurchaseReturnItem[]
+  createdAt    DateTime             @default(now())
+
+  @@index([purchaseId])
+  @@map("purchase_returns")
+}
+
+model PurchaseReturnItem {
+  id               String         @id @default(uuid())
+  purchaseReturnId String
+  purchaseReturn   PurchaseReturn @relation(fields: [purchaseReturnId], references: [id], onDelete: Cascade)
+  purchaseItemId   String
+  purchaseItem     PurchaseItem   @relation(fields: [purchaseItemId], references: [id])
+  quantity         Decimal        @db.Decimal(12, 3)
+  amount           Decimal        @db.Decimal(14, 2)
+
+  @@map("purchase_return_items")
 }
 
 model SupplierPayment {
@@ -495,11 +530,13 @@ model Return {
   customer     Customer?    @relation(fields: [customerId], references: [id])
   cashierId    String
   reason       String?
+  refundMethod PaymentMethod @default(CASH)
   totalRefund  Decimal      @db.Decimal(14, 2)
   items        ReturnItem[]
   createdAt    DateTime     @default(now())
 
   @@index([saleId])
+  @@index([createdAt])
   @@map("returns")
 }
 
@@ -511,6 +548,7 @@ model ReturnItem {
   saleItem     SaleItem @relation(fields: [saleItemId], references: [id])
   quantity     Decimal  @db.Decimal(12, 3)
   refundAmount Decimal  @db.Decimal(14, 2)
+  restock Boolean @default(true)
   reason       String?
 
   @@map("return_items")
@@ -527,8 +565,11 @@ model Expense {
   date          DateTime      @default(now())
   employeeId    String?
   employee      User?         @relation(fields: [employeeId], references: [id])
+  cashSessionId String?
+  cashSession   CashSession?  @relation(fields: [cashSessionId], references: [id])
   notes         String?
 
+  @@index([date])
   @@map("expenses")
 }
 
@@ -555,6 +596,7 @@ model CashSession {
 
   sales     Sale[]
   movements CashMovement[]
+  expenses  Expense[]
 
   @@index([cashierId])
   @@index([status])
@@ -579,6 +621,7 @@ model CashMovement {
   notes       String?
   createdAt   DateTime         @default(now())
 
+  @@index([sessionId])
   @@map("cash_movements")
 }
 

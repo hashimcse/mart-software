@@ -38,7 +38,7 @@ export default function Login() {
           <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-lg bg-ledger-600 font-display text-lg font-semibold text-white">
             M
           </div>
-          <h1 className="font-display text-xl font-semibold text-ink">ABC Mart</h1>
+          <h1 className="font-display text-xl font-semibold text-ink">Supermarket POS</h1>
           <p className="text-sm text-ink/60">Sign in to your terminal</p>
         </div>
 
@@ -97,7 +97,7 @@ export default function Login() {
         />
 
         <p className="figure mt-4 text-center text-xs text-ink/40">
-          demo — admin / Admin@12345 · cashier1 / Cashier@12345
+          Use the account provided by your store administrator.
         </p>
       </div>
     </div>

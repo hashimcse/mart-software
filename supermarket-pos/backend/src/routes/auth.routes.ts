@@ -16,7 +16,7 @@ const loginLimiter = rateLimit({
 });
 
 router.post('/login', loginLimiter, validateBody(loginSchema), authController.login);
-router.post('/refresh', validateBody(refreshSchema), authController.refresh);
+router.post('/refresh', rateLimit({windowMs:60000,limit:60,standardHeaders:true,legacyHeaders:false}), validateBody(refreshSchema), authController.refresh);
 router.post('/logout', validateBody(refreshSchema), authController.logout);
 router.get('/me', authenticate, authController.me);
 

@@ -9,6 +9,7 @@ const STORE_FIELDS: { key: string; label: string; multiline?: boolean }[] = [
   { key: 'store.phone', label: 'Phone' },
   { key: 'store.taxNumber', label: 'Tax number' },
   { key: 'store.receiptFooter', label: 'Receipt footer', multiline: true },
+  { key: 'pos.largeDiscountPercent', label: 'Standard discount limit (%)' },
 ];
 
 export default function Settings() {
@@ -69,8 +70,7 @@ export default function Settings() {
     <div className="p-8">
       <h1 className="font-display text-2xl font-semibold text-ink">Settings</h1>
       <p className="mt-1 text-ink/60">
-        Store details and receipt/printer configuration. The full settings module (users, backups) ships in Phase
-        10.
+        Store details, discount authorization and receipt/printer configuration.
       </p>
 
       {error && <div className="mt-4 rounded-md bg-brick-50 px-3 py-2 text-sm text-brick-600">{error}</div>}

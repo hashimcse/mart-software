@@ -1,6 +1,6 @@
 import { prisma } from '../config/database';
 import { hashPassword } from '../utils/password';
-import { ConflictError, NotFoundError } from '../utils/errors';
+import { ConflictError, NotFoundError, ValidationError } from '../utils/errors';
 import { recordAuditLog } from './audit.service';
 
 export async function listUsers() {
@@ -71,6 +71,7 @@ export async function createUser(input: CreateUserInput, actingUserId: string) {
 }
 
 export async function setUserActive(userId: string, isActive: boolean, actingUserId: string) {
+  if(userId===actingUserId&&!isActive) throw new ValidationError('You cannot deactivate your own account');
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) throw new NotFoundError('User not found');
 
@@ -85,5 +86,5 @@ export async function setUserActive(userId: string, isActive: boolean, actingUse
     newValue: { isActive: updated.isActive },
   });
 
-  return updated;
+  return {id:updated.id,name:updated.name,username:updated.username,isActive:updated.isActive};
 }

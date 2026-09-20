@@ -75,6 +75,8 @@ const DEMO_USERS: { name: string; username: string; email: string; password: str
 ];
 
 async function main() {
+  const demo = process.env.SEED_DEMO === 'true';
+  if(!demo && (!process.env.INITIAL_ADMIN_PASSWORD || process.env.INITIAL_ADMIN_PASSWORD.length < 12)) throw new Error('Set INITIAL_ADMIN_PASSWORD (12+ characters) for a clean store, or SEED_DEMO=true for disposable demo data');
   console.log('Seeding permissions...');
   for (const perm of PERMISSIONS) {
     await prisma.permission.upsert({
@@ -125,7 +127,8 @@ async function main() {
 
   console.log('Seeding demo users...');
   const saltRounds = Number(process.env.BCRYPT_SALT_ROUNDS ?? 12);
-  for (const u of DEMO_USERS) {
+  const users = demo ? DEMO_USERS : [{name:'Store Administrator',username:process.env.INITIAL_ADMIN_USERNAME??'admin',email:'admin@example.com',password:process.env.INITIAL_ADMIN_PASSWORD!,role:'ADMIN'}];
+  for (const u of users) {
     const role = await prisma.role.findUniqueOrThrow({ where: { name: u.role } });
     const passwordHash = await bcrypt.hash(u.password, saltRounds);
     await prisma.user.upsert({
@@ -141,6 +144,7 @@ async function main() {
     });
   }
 
+  if(!demo) {console.log('Store initialized. No demo products, customers or shared demo passwords were created.');return;}
   console.log('Seeding demo catalog data...');
   const categoryNames = ['Grocery', 'Beverages', 'Dairy & Eggs', 'Household'];
   const categories: Record<string, string> = {};

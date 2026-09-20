@@ -11,8 +11,8 @@ interface AuditLogInput {
   ipAddress?: string | null;
 }
 
-export async function recordAuditLog(input: AuditLogInput): Promise<void> {
-  await prisma.auditLog.create({
+export async function recordAuditLog(input: AuditLogInput, client: Prisma.TransactionClient | typeof prisma = prisma): Promise<void> {
+  await client.auditLog.create({
     data: {
       userId: input.userId ?? undefined,
       action: input.action,

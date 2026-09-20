@@ -14,8 +14,16 @@ import inventoryRoutes from './inventory.routes';
 import dashboardRoutes from './dashboard.routes';
 import supplierRoutes from './supplier.routes';
 import purchaseRoutes from './purchase.routes';
+import returnRoutes from './return.routes';
+import cashSessionRoutes from './cashSession.routes';
+import expenseRoutes from './expense.routes';
+
+import reportRoutes from './report.routes';
+import backupRoutes from './backup.routes';
 
 const router = Router();
+router.use('/reports', reportRoutes);
+router.use('/backups', backupRoutes);
 
 router.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -36,5 +44,8 @@ router.use('/inventory', inventoryRoutes);
 router.use('/dashboard', dashboardRoutes);
 router.use('/suppliers', supplierRoutes);
 router.use('/purchases', purchaseRoutes);
+router.use('/returns', returnRoutes);
+router.use('/cash-sessions', cashSessionRoutes);
+router.use('/expenses', expenseRoutes);
 
 export default router;

@@ -6,13 +6,14 @@ import { recordAuditLog } from './audit.service';
 import { getSettings } from './settings.service';
 import { parsePagination, toPaginatedResult } from '../utils/pagination';
 import type { CreateSaleInput } from '../schemas/sale.schema';
+import { computeBalance } from './customer.service';
 
 // Per-line or cart-level discounts above this fraction of the pre-discount
 // amount need `discounts.apply_large`, not just `discounts.apply` (spec
 // section 14: "Only authorized employees should be able to apply large
 // discounts"). This threshold isn't yet exposed in Settings — worth adding
 // there before it needs to vary by store.
-const LARGE_DISCOUNT_RATIO = 0.2;
+
 
 const SALE_INCLUDE = {
   items: { include: { product: true } },
@@ -22,13 +23,13 @@ const SALE_INCLUDE = {
   terminal: true,
 } as const;
 
-function assertDiscountAllowed(discount: Prisma.Decimal, base: Prisma.Decimal, permissions: string[]) {
+function assertDiscountAllowed(discount: Prisma.Decimal, base: Prisma.Decimal, permissions: string[], limit: Prisma.Decimal) {
   if (discount.isZero()) return;
   if (!permissions.includes('discounts.apply')) {
     throw new ForbiddenError('You do not have permission to apply discounts');
   }
   const ratio = base.isZero() ? new Prisma.Decimal(0) : discount.div(base);
-  if (ratio.greaterThan(LARGE_DISCOUNT_RATIO) && !permissions.includes('discounts.apply_large')) {
+  if (ratio.greaterThan(limit) && !permissions.includes('discounts.apply_large')) {
     throw new ForbiddenError('This discount exceeds your authorization limit — ask a manager to approve it');
   }
 }
@@ -60,11 +61,14 @@ function computeLine(product: ProductForLine, quantity: string, discount: Prisma
     }
   }
 
+  tax = tax.toDecimalPlaces(2);
+  subtotal = subtotal.toDecimalPlaces(2);
   return { unitPrice, taxableAmount, subtotal, tax };
 }
 
 export async function createSale(input: CreateSaleInput, cashierId: string, permissions: string[]) {
   const settings = await getSettings();
+  const discountLimit = new Prisma.Decimal(String(settings['pos.largeDiscountPercent'] ?? '20')).div(100);
   const loyaltyEnabled = settings['loyalty.enabled'] === 'true';
   const pointsPerHundred = new Prisma.Decimal(String(settings['loyalty.pointsPerHundred'] ?? '1'));
 
@@ -72,9 +76,22 @@ export async function createSale(input: CreateSaleInput, cashierId: string, perm
     const terminal = await tx.terminal.findUnique({ where: { id: input.terminalId } });
     if (!terminal || !terminal.isActive) throw new ValidationError('Invalid or inactive terminal');
 
+    // Linking is opportunistic, not required — a terminal without an open
+    // cash session can still ring up sales, it just won't show up in that
+    // session's reconciliation.
+    await tx.$queryRaw`SELECT id FROM terminals WHERE id = ${input.terminalId} FOR UPDATE`;
+    const openSession = await tx.cashSession.findFirst({ where: { terminalId: input.terminalId, status: 'OPEN' } });
+
     if (input.customerId) {
+      await tx.$queryRaw`SELECT id FROM customers WHERE id = ${input.customerId} FOR UPDATE`;
       const customer = await tx.customer.findUnique({ where: { id: input.customerId } });
       if (!customer) throw new ValidationError('Customer not found');
+      const credit = input.payments.filter(p=>p.method==='CREDIT').reduce((sum,p)=>sum.add(p.amount),new Prisma.Decimal(0));
+      if(credit.gt(0)) {
+        if(customer.type!=='CREDIT') throw new ValidationError('Customer is not enabled for credit');
+        const balance=await computeBalance(tx,customer.id);
+        if(new Prisma.Decimal(balance.outstandingBalance).add(credit).gt(customer.creditLimit)) throw new ValidationError('Customer credit limit exceeded');
+      }
     }
 
     const productIds = input.items.map((i) => i.productId);
@@ -89,6 +106,7 @@ export async function createSale(input: CreateSaleInput, cashierId: string, perm
       productId: string;
       quantity: string;
       unitPrice: Prisma.Decimal;
+      unitCost: Prisma.Decimal;
       discount: Prisma.Decimal;
       tax: Prisma.Decimal;
       subtotal: Prisma.Decimal;
@@ -102,7 +120,7 @@ export async function createSale(input: CreateSaleInput, cashierId: string, perm
       const discount = new Prisma.Decimal(item.discount ?? '0');
       const { unitPrice, taxableAmount, subtotal: lineSubtotal, tax: lineTax } = computeLine(product, item.quantity, discount);
 
-      assertDiscountAllowed(discount, unitPrice.mul(new Prisma.Decimal(item.quantity)), permissions);
+      assertDiscountAllowed(discount, unitPrice.mul(new Prisma.Decimal(item.quantity)), permissions, discountLimit);
       if (taxableAmount.isNegative()) {
         throw new ValidationError(`Discount on "${product.name}" cannot exceed its price`);
       }
@@ -111,13 +129,14 @@ export async function createSale(input: CreateSaleInput, cashierId: string, perm
       taxAmount = taxAmount.add(lineTax);
       lineDiscountTotal = lineDiscountTotal.add(discount);
 
-      lineData.push({ productId: product.id, quantity: item.quantity, unitPrice, discount, tax: lineTax, subtotal: lineSubtotal });
+      lineData.push({ productId: product.id, quantity: item.quantity, unitPrice, unitCost: product.purchasePrice, discount, tax: lineTax, subtotal: lineSubtotal });
     }
 
     const cartDiscount = new Prisma.Decimal(input.discountAmount ?? '0');
-    assertDiscountAllowed(cartDiscount, subtotal.add(taxAmount), permissions);
+    assertDiscountAllowed(cartDiscount, subtotal.add(taxAmount), permissions, discountLimit);
+    assertDiscountAllowed(lineDiscountTotal.add(cartDiscount), subtotal.add(taxAmount).add(lineDiscountTotal), permissions, discountLimit);
 
-    const total = subtotal.add(taxAmount).sub(cartDiscount);
+    const total = subtotal.add(taxAmount).sub(cartDiscount).toDecimalPlaces(2);
     if (total.isNegative()) throw new ValidationError('Discount cannot exceed the sale total');
 
     // Split payments (spec section 12): each non-cash line is charged for
@@ -159,6 +178,7 @@ export async function createSale(input: CreateSaleInput, cashierId: string, perm
       : new Prisma.Decimal(0);
     const changeDue = cashTendered.sub(cashApplied);
 
+    if (nonCashPayments.some(p => p.method === 'CREDIT') && !input.customerId) throw new ValidationError('Credit sales require a customer');
     const paymentRows: { method: PaymentMethod; amount: Prisma.Decimal }[] = nonCashPayments.map((p) => ({
       method: p.method as PaymentMethod,
       amount: new Prisma.Decimal(p.amount),
@@ -196,6 +216,7 @@ export async function createSale(input: CreateSaleInput, cashierId: string, perm
         customerId: input.customerId ?? undefined,
         cashierId,
         terminalId: input.terminalId,
+        cashSessionId: openSession?.id,
         subtotal,
         discountAmount: lineDiscountTotal.add(cartDiscount),
         taxAmount,
@@ -205,6 +226,7 @@ export async function createSale(input: CreateSaleInput, cashierId: string, perm
             productId: l.productId,
             quantity: l.quantity,
             unitPrice: l.unitPrice,
+            unitCost: l.unitCost,
             discount: l.discount,
             tax: l.tax,
             subtotal: l.subtotal,
@@ -214,6 +236,16 @@ export async function createSale(input: CreateSaleInput, cashierId: string, perm
       },
       include: SALE_INCLUDE,
     });
+
+    // The cash portion of this sale's applied payment (never the amount
+    // tendered before change) is exactly the drawer's net cash inflow —
+    // see docs/ARCHITECTURE.md for why that equivalence holds.
+    const cashRow = paymentRows.find((p) => p.method === 'CASH');
+    if (openSession && cashRow) {
+      await tx.cashMovement.create({
+        data: { sessionId: openSession.id, type: 'SALE', amount: cashRow.amount, referenceId: sale.id },
+      });
+    }
 
     for (const item of input.items) {
       await tx.inventoryMovement.create({
@@ -251,7 +283,7 @@ export async function createSale(input: CreateSaleInput, cashierId: string, perm
       entityType: 'Sale',
       entityId: sale.id,
       newValue: { invoiceNumber, total: total.toFixed(2), itemCount: input.items.length, loyaltyPointsEarned },
-    });
+    }, tx);
 
     return { sale, changeDue: changeDue.toFixed(2), loyaltyPointsEarned };
   });

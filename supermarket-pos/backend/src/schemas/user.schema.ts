@@ -8,7 +8,7 @@ export const createUserSchema = z.object({
     .max(50)
     .regex(/^[a-zA-Z0-9._-]+$/, 'Username may only contain letters, numbers, dots, dashes and underscores'),
   email: z.string().email().optional(),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
+  password: z.string().min(12, 'Password must be at least 12 characters').max(72),
   roleName: z.enum(['ADMIN', 'MANAGER', 'CASHIER', 'INVENTORY_MANAGER', 'ACCOUNTANT']),
 });
 

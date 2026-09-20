@@ -12,17 +12,34 @@ import type {
 
 // Outstanding balance is never stored on the Customer row — it's computed
 // from CREDIT-method sale payments minus what they've paid back, the same
-// "never store what can drift" pattern used for supplier balances.
+// "never store what can drift" pattern used for supplier balances. A
+// return against a credit-paid sale reduces what that sale contributes,
+// capped per-sale at the credit amount so a mostly-cash sale with a small
+// credit component can't be pushed into an unrealistic negative.
 async function computeBalance(tx: Prisma.TransactionClient | typeof prisma, customerId: string) {
-  const [creditPayments, customerPayments] = await Promise.all([
+  const [creditPayments, customerPayments, returns] = await Promise.all([
     tx.payment.findMany({
       where: { method: 'CREDIT', sale: { customerId, status: { not: 'CANCELLED' } } },
-      select: { amount: true },
+      select: { amount: true, saleId: true },
     }),
     tx.customerPayment.findMany({ where: { customerId }, select: { amount: true } }),
+    tx.return.findMany({ where: { sale: { customerId }, refundMethod: 'CREDIT' }, select: { totalRefund: true, saleId: true } }),
   ]);
 
-  const totalCredit = creditPayments.reduce((sum, p) => sum.add(p.amount), new Prisma.Decimal(0));
+  const returnedBySale = new Map<string, Prisma.Decimal>();
+  for (const r of returns) {
+    returnedBySale.set(r.saleId, (returnedBySale.get(r.saleId) ?? new Prisma.Decimal(0)).add(r.totalRefund));
+  }
+
+  let totalCredit = new Prisma.Decimal(0);
+  const creditBySale = new Map<string,Prisma.Decimal>();
+  for (const p of creditPayments) {
+    creditBySale.set(p.saleId,(creditBySale.get(p.saleId)??new Prisma.Decimal(0)).add(p.amount));
+  }
+  for(const [saleId,amount] of creditBySale) {
+    totalCredit=totalCredit.add(amount.sub(Prisma.Decimal.min(returnedBySale.get(saleId)??0,amount)));
+  }
+
   const totalPaid = customerPayments.reduce((sum, p) => sum.add(p.amount), new Prisma.Decimal(0));
   const outstandingBalance = totalCredit.sub(totalPaid);
 
@@ -165,7 +182,7 @@ export async function adjustLoyaltyPoints(customerId: string, pointsChange: numb
       entityId: customerId,
       oldValue: { loyaltyPoints: customer.loyaltyPoints },
       newValue: { loyaltyPoints: newTotal, change: pointsChange, reason },
-    });
+    }, tx);
 
     return updated;
   });

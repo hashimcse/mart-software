@@ -43,11 +43,13 @@ export function fetchSettings() {
   return apiRequest<Settings>('/settings');
 }
 
-export function updateSetting(key: string, value: string) {
-  return apiRequest<{ key: string; value: unknown }>(`/settings/${encodeURIComponent(key)}`, {
+export async function updateSetting(key: string, value: string) {
+  const result = await apiRequest<{ key: string; value: unknown }>(`/settings/${encodeURIComponent(key)}`, {
     method: 'PUT',
     body: { value },
   });
+  window.dispatchEvent(new Event('pos:settings-updated'));
+  return result;
 }
 
 export function sendTestPrint() {

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import * as saleController from '../controllers/sale.controller';
 import * as receiptController from '../controllers/receipt.controller';
+import * as returnController from '../controllers/return.controller';
 import { authenticate } from '../middleware/auth.middleware';
 import { requirePermission } from '../middleware/permission.middleware';
 import { validateBody } from '../middleware/validate.middleware';
@@ -14,5 +15,6 @@ router.get('/:id', requirePermission('sales.create'), saleController.getOne);
 router.post('/', requirePermission('sales.create'), validateBody(createSaleSchema), saleController.create);
 router.get('/:id/receipt.escpos', requirePermission('sales.create'), receiptController.downloadEscPos);
 router.post('/:id/print', requirePermission('sales.create'), receiptController.printNetwork);
+router.get('/:saleId/returnable', requirePermission('refunds.process'), returnController.returnableForSale);
 
 export default router;

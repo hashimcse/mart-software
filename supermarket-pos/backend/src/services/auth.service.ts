@@ -1,10 +1,14 @@
 import { prisma } from '../config/database';
+import bcrypt from 'bcryptjs';
+import { randomBytes } from 'crypto';
 import { verifyPassword } from '../utils/password';
 import { signAccessToken } from '../utils/jwt';
 import { generateRefreshToken, hashToken } from '../utils/tokens';
 import { env } from '../config/env';
 import { UnauthorizedError } from '../utils/errors';
 import { recordAuditLog } from './audit.service';
+
+const dummyHash = bcrypt.hashSync(randomBytes(32).toString("hex"), env.bcryptSaltRounds);
 
 async function loadUserWithPermissions(userId: string) {
   return prisma.user.findUnique({
@@ -30,7 +34,7 @@ function toPublicUser(user: UserWithPermissions) {
 
 async function issueTokens(userId: string) {
   const user = await loadUserWithPermissions(userId);
-  if (!user) throw new UnauthorizedError();
+  if (!user || !user.isActive) throw new UnauthorizedError();
 
   const permissions = user.role.permissions.map((rp) => rp.permission.key);
   const accessToken = signAccessToken({
@@ -55,7 +59,7 @@ export async function login(username: string, password: string, ipAddress?: stri
   // NOTE: for simplicity this skips a constant-time dummy-hash comparison
   // when the user doesn't exist. A hardening pass in a later phase can add
   // that to fully mask username enumeration via response timing.
-  const passwordOk = user ? await verifyPassword(password, user.passwordHash) : false;
+  const passwordOk = await verifyPassword(password, user?.passwordHash ?? dummyHash);
 
   if (!user || !passwordOk || !user.isActive) {
     await recordAuditLog({
@@ -89,7 +93,8 @@ export async function refreshSession(refreshToken: string) {
   }
 
   // Rotate: revoke the presented token and issue a brand new pair.
-  await prisma.refreshToken.update({ where: { id: existing.id }, data: { revoked: true } });
+  const claimed = await prisma.refreshToken.updateMany({ where: { id: existing.id, revoked: false }, data: { revoked: true } });
+  if (claimed.count !== 1) throw new UnauthorizedError('Refresh token already used');
   return issueTokens(existing.userId);
 }
 

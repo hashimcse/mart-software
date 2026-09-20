@@ -1,6 +1,30 @@
+# Start here
+
+On Windows, **double-click Supermarket POS.exe**. It starts the local database and opens the POS in your default browser at http://localhost:4010. Keep the executable beside the `backend`, `frontend` and `launcher` folders; extract the whole ZIP first.
+
+Requires Node.js 22.12+ (including npm) and PostgreSQL 14+ installed. First setup needs internet to install and build dependencies; subsequent launches reuse the installation. These runtimes are already installed on the development computer. This is a browser-app launcher, not an installer containing those runtimes.
+
+Demo login: **admin / Admin@12345**. Local data persists in `.local`; closing the browser leaves the server running. For a real store, follow [DEPLOYMENT.md](docs/DEPLOYMENT.md). The alternative **START-DEMO.ps1** script requires PowerShell 7.2+.
+
+## Added in this continuation
+
+- Reports by day/week/month/cashier/product/category/customer/payment, current stock reports and financial summaries. CSV, XLSX and PDF exports; dashboard sales chart.
+- Manual and scheduled PostgreSQL backups, checksums, failure history, product-image copies and restore into a separate database.
+- Staff account screen, configurable discount threshold, authentication hardening, transaction fixes and updated dependencies.
+- Database migrations, persistent unit/integration tests, backup restore verification and Windows/LAN deployment instructions.
+
+### New API endpoints
+
+| Method | Endpoint | Permission |
+|---|---|---|
+| GET | /api/reports?from=YYYY-MM-DD&to=YYYY-MM-DD&kind=sales&group=day&format=json | reports.view; financial/cost fields require profits.view |
+| GET / POST | /api/backups | backup.manage |
+| GET | /api/backups/:id/download | backup.manage |
+| POST | /api/backups/:id/restore | backup.manage; confirmation body described in deployment guide |
+
 # Supermarket POS & Store Management System
 
-Production-oriented POS/store management system, built in phases. **This is Phase 1 through 7 of 13** — architecture, full database schema, authentication, product/category/brand management, the POS screen, split payments, thermal receipt printing, inventory, purchases/suppliers, and customers/loyalty. See `docs/ROADMAP.md` for what's next, and `docs/ARCHITECTURE.md` for how it's put together and exactly what has (and hasn't) been verified end-to-end.
+Production-oriented POS/store management system, built in phases. **Phases 1–13 are implemented; see docs/VERIFICATION.md for tested scope and operating limits** — architecture, full database schema, authentication, product/category/brand management, the POS screen, split payments, thermal receipt printing, inventory, purchases/suppliers, customers/loyalty, returns/refunds, and expenses/cash register. See `docs/ROADMAP.md` for what's next, and `docs/ARCHITECTURE.md` for how it's put together and exactly what has (and hasn't) been verified end-to-end.
 
 ## Stack
 
@@ -9,7 +33,7 @@ Production-oriented POS/store management system, built in phases. **This is Phas
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 22.12+
 - PostgreSQL 14+ (running locally or reachable over your network)
 
 ## Setup
@@ -30,8 +54,8 @@ cd backend
 cp .env.example .env      # then edit DATABASE_URL and ACCESS_TOKEN_SECRET
 npm install
 npx prisma generate       # downloads a small schema-parsing tool on first run — needs normal internet access
-npx prisma migrate dev --name init
-npm run prisma:seed       # also seeds 8 demo products, 2 customers (one on credit), 2 suppliers
+npm run prisma:deploy
+npm run prisma:seed       # set SEED_DEMO=true for demo data, or INITIAL_ADMIN_PASSWORD for a clean store
 npm run verify:auth       # optional: exercises JWT/password/token logic with no DB needed
 npm run dev
 ```
@@ -75,12 +99,13 @@ Seeded by `npm run prisma:seed`. **Change these before any real use.**
 - Inventory: stock adjustments (with a direction + required reason), damaged/expired write-offs, a filterable/paginated movement ledger, low-stock/out-of-stock/expiring-soon alerts, and a stock valuation report (cost basis, retail value, potential profit). The Dashboard's metrics are real numbers now, not placeholders.
 - Purchases: full purchase-order workflow (order → receive → invoice → pay), with stock only increasing once a PO is actually received. Supplier records with a computed (never stored) outstanding balance, and a payment history.
 - Customers: full records (walk-in/registered/credit) with purchase history, a computed credit balance, payment recording, and loyalty points that accrue automatically at checkout and can be manually adjusted. The Dashboard's four metrics are all real numbers now — nothing left as a placeholder.
-- Audit logging on login, failed login, user changes, every catalog create/update/delete/status change, every completed sale, every settings change, every inventory movement, every purchase/supplier-payment action, and every customer/loyalty change.
-- React app: login screen, protected sidebar shell, Catalog, POS, Inventory, Purchases, Customers, and Settings — all wired to the real API, no mocked data. Only Reports remains a "not built yet" placeholder.
+- Returns: full or partial returns against a sale, refunded proportionally to what was actually paid (discount and tax included), with per-line restock-or-not and the over-return cap enforced even across multiple partial returns. Purchase returns too — sending received stock back to a supplier, adjusting both stock and what's owed.
+- Audit logging on login, failed login, user changes, every catalog create/update/delete/status change, every completed sale, every settings change, every inventory movement, every purchase/supplier-payment action, every customer/loyalty change, and every return.
+- React app: login screen, protected sidebar shell, Catalog, POS (with returns built in), Inventory, Purchases (with purchase returns built in), Customers, and Settings — all wired to the real API, no mocked data. Reports, Backups and Team are connected to the API.
 
 ## What's not built yet
 
-Returns, reports beyond the dashboard/inventory numbers already in place, cash register shifts, backups. The schema already supports all of it; each phase adds the services/routes/UI on top.
+See docs/DEPLOYMENT.md for explicit operating limits, historical-cost handling and store-site acceptance steps.
 
 ## Printer setup
 
@@ -197,8 +222,31 @@ Returns `{ sale, changeDue }`. Quantities/discounts/amounts are strings, not num
 
 `POST /api/sales`'s response now also includes `loyaltyPointsEarned` — points accrue automatically for any sale with a customer attached, at a rate set in Settings (`loyalty.enabled`, `loyalty.pointsPerHundred`).
 
-## Known items
+### Returns (Phase 8)
 
-- `npm audit` flags an esbuild dev-server-only advisory in the frontend toolchain (fixable only via a Vite major-version bump). It affects `vite dev` accepting cross-origin requests, not the production build output. Left as-is rather than force an untested breaking upgrade — revisit in Phase 12 (security/performance hardening).
-- `npm audit` also flags a stack-exhaustion (DoS) advisory in `deepmerge-ts`, a transitive devDependency of `prisma`'s config parser — not shipped in the running backend (`@prisma/client` doesn't depend on it). No fix exists yet at the current latest Prisma version (7.9.1); the only suggested "fix" downgrades to Prisma 6.12.0, which would undo the Rust-free architecture change made specifically to avoid this sandbox's — and possibly some real deployments' — network restriction on `binaries.prisma.sh` (see docs/ARCHITECTURE.md). Left as-is; low real-world risk for a locally-run dev/build tool.
-- Login's timing isn't fully constant-time between "user doesn't exist" and "wrong password" — noted in `auth.service.ts` as a candidate for the Phase 12 hardening pass.
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/api/sales/:saleId/returnable` | Bearer + `refunds.process` | per-line returnable quantity for a sale (accounts for prior partial returns) |
+| GET | `/api/returns?page=&pageSize=&saleId=` | Bearer + `refunds.process` | paginated return history |
+| GET | `/api/returns/:id` | Bearer + `refunds.process` | return detail |
+| POST | `/api/returns` | Bearer + `refunds.process` | `{ saleId, items: [{saleItemId, quantity, restock?}], reason? }` — full or partial return, refunded proportionally |
+| GET | `/api/purchases/:purchaseId/returnable` | Bearer + `purchases.manage` | per-line returnable quantity for a received purchase |
+| POST | `/api/purchases/:id/returns` | Bearer + `purchases.manage` | `{ items: [{purchaseItemId, quantity}], reason? }` — send received stock back to the supplier |
+
+### Cash register + expenses (Phase 9)
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/api/cash-sessions/open?terminalId=` | Bearer + `cash_register.manage` | the terminal's currently open session, if any |
+| GET | `/api/cash-sessions/:id` | Bearer + `cash_register.manage` | session detail with running expected cash and per-type movement totals |
+| POST | `/api/cash-sessions` | Bearer + `cash_register.manage` | `{ terminalId, openingCash }` — open a shift (fails if one's already open there) |
+| POST | `/api/cash-sessions/:id/movements` | Bearer + `cash_register.manage` | `{ type: CASH_IN\|CASH_OUT, amount, notes? }` |
+| POST | `/api/cash-sessions/:id/close` | Bearer + `cash_register.manage` | `{ actualCash }` — computes expected cash and the difference |
+| GET | `/api/expenses?page=&pageSize=&category=` | Bearer + `expenses.manage` | paginated expense list |
+| POST | `/api/expenses` | Bearer + `expenses.manage` | `{ category, description?, amount, paymentMethod, cashSessionId? }` |
+
+Sales and cash refunds automatically post a movement to whichever terminal has an open session — no extra step needed at checkout.
+
+## Current release notes
+
+Read [Deployment](docs/DEPLOYMENT.md), [Verification](docs/VERIFICATION.md), and [Handoff](docs/HANDOFF.md). The original Phase 9 documents are retained with a _PHASE9 suffix for provenance; their verification claims do not describe this release.

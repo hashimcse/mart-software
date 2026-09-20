@@ -53,7 +53,7 @@ export async function createPurchase(input: CreatePurchaseInput, userId: string)
       entityType: 'Purchase',
       entityId: purchase.id,
       newValue: { purchaseNumber, total: total.toFixed(2), itemCount: itemsData.length },
-    });
+    }, tx);
 
     return purchase;
   });
@@ -65,6 +65,7 @@ export async function createPurchase(input: CreatePurchaseInput, userId: string)
 // Invoice → Payment). Creating the PO alone never touches inventory.
 export async function receivePurchase(purchaseId: string, userId: string) {
   return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM purchases WHERE id = ${purchaseId} FOR UPDATE`;
     const purchase = await tx.purchase.findUnique({ where: { id: purchaseId }, include: { items: true } });
     if (!purchase) throw new NotFoundError('Purchase not found');
     if (purchase.status !== 'ORDERED') {
@@ -100,7 +101,7 @@ export async function receivePurchase(purchaseId: string, userId: string) {
       entityType: 'Purchase',
       entityId: purchaseId,
       newValue: { itemCount: purchase.items.length },
-    });
+    }, tx);
 
     return updated;
   });
@@ -114,7 +115,7 @@ export async function markInvoiced(purchaseId: string, userId: string) {
   }
 
   const updated = await prisma.purchase.update({
-    where: { id: purchaseId },
+    where: { id: purchaseId, status: 'RECEIVED' },
     data: { status: 'INVOICED' },
     include: PURCHASE_INCLUDE,
   });
@@ -133,7 +134,7 @@ export async function cancelPurchase(purchaseId: string, userId: string) {
   }
 
   const updated = await prisma.purchase.update({
-    where: { id: purchaseId },
+    where: { id: purchaseId, status: 'ORDERED' },
     data: { status: 'CANCELLED' },
     include: PURCHASE_INCLUDE,
   });
@@ -214,7 +215,7 @@ export async function recordSupplierPayment(
       entityType: 'Supplier',
       entityId: supplierId,
       newValue: { amount: input.amount, method: input.method, purchaseId: input.purchaseId ?? null },
-    });
+    }, tx);
 
     return payment;
   });

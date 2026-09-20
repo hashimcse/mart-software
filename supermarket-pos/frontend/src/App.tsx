@@ -9,8 +9,11 @@ import Pos from './pages/Pos';
 import Inventory from './pages/Inventory';
 import Purchases from './pages/Purchases';
 import Customers from './pages/Customers';
+import Expenses from './pages/Expenses';
 import SettingsPage from './pages/Settings';
-import ComingSoon from './pages/ComingSoon';
+import Reports from './pages/Reports';
+import Backups from './pages/Backups';
+import Users from './pages/Users';
 
 export default function App() {
   return (
@@ -26,7 +29,10 @@ export default function App() {
               <Route path="/inventory" element={<Inventory />} />
               <Route path="/purchases" element={<Purchases />} />
               <Route path="/customers" element={<Customers />} />
-              <Route path="/reports" element={<ComingSoon title="Reports" />} />
+              <Route path="/expenses" element={<Expenses />} />
+              <Route path="/reports" element={<Reports />} />
+              <Route path="/backups" element={<Backups />} />
+              <Route path="/users" element={<Users />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Route>
           </Route>

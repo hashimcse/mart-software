@@ -20,3 +20,13 @@ export async function nextPurchaseNumber(tx: TxClient): Promise<string> {
   const value = await nextValue(tx, 'purchase');
   return `PO-${String(value).padStart(6, '0')}`;
 }
+
+export async function nextReturnNumber(tx: TxClient): Promise<string> {
+  const value = await nextValue(tx, 'return');
+  return `RET-${String(value).padStart(6, '0')}`;
+}
+
+export async function nextPurchaseReturnNumber(tx: TxClient): Promise<string> {
+  const value = await nextValue(tx, 'purchase_return');
+  return `PRET-${String(value).padStart(6, '0')}`;
+}

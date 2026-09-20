@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.local/
+runtime/
+.env
+.env.*
+!.env.example
+uploads/
+backups/
+*.dump
+*.log
+relocated-to.txt
+READ-ME-FIRST.txt

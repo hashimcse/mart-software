@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.env.local
+.local/
+backend/backups/
+backend/uploads/
+backend/src/generated/
