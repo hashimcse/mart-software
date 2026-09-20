@@ -8,6 +8,12 @@ Demo login: **admin / Admin@12345**. Local data persists in `.local`; closing th
 
 ## Added in this continuation
 
+### WhatsApp receipts
+
+After a sale, choose **Send on WhatsApp**, or choose **WhatsApp** in Recent sales. Review the receipt and enter/check the recipient's number, then choose **Open WhatsApp** and press Send there. Saved customer numbers are prefilled; walk-in numbers are used only for this receipt. Pakistani mobile numbers starting with 03 are converted to international format. Other countries require the country code. Very long receipts can be copied and pasted into the chat. Requires internet and WhatsApp; no messaging API or automatic sending is used.
+
+Phone/receipt regression checks: with Node.js 22.18+ or 24, run `node --experimental-strip-types --test --test-isolation=none frontend/tests/whatsappReceipt.test.ts` from this folder.
+
 - Reports by day/week/month/cashier/product/category/customer/payment, current stock reports and financial summaries. CSV, XLSX and PDF exports; dashboard sales chart.
 - Manual and scheduled PostgreSQL backups, checksums, failure history, product-image copies and restore into a separate database.
 - Staff account screen, configurable discount threshold, authentication hardening, transaction fixes and updated dependencies.

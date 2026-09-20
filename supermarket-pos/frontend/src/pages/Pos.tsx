@@ -18,6 +18,7 @@ import { CartSummary, PaymentLine } from '../components/pos/CartSummary';
 import { CustomerPicker } from '../components/pos/CustomerPicker';
 import { HeldBillsPanel } from '../components/pos/HeldBillsPanel';
 import { SaleCompleteModal } from '../components/pos/SaleCompleteModal';
+import { WhatsAppReceiptModal } from '../components/pos/WhatsAppReceiptModal';
 import { ReturnFormModal } from '../components/pos/ReturnFormModal';
 import { CashRegisterPanel } from '../components/register/CashRegisterPanel';
 import type { Product } from '../types/catalog';
@@ -46,6 +47,7 @@ export default function Pos() {
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [printingRowId, setPrintingRowId] = useState<string | null>(null);
+  const [whatsappSaleId, setWhatsappSaleId] = useState<string | null>(null);
   const [returningSaleId, setReturningSaleId] = useState<string | null>(null);
   const [returnMessage, setReturnMessage] = useState<string | null>(null);
   const canProcessReturns = hasPermission('refunds.process');
@@ -203,6 +205,7 @@ export default function Pos() {
   // Keyboard shortcuts (spec section 27).
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
+      if (completed || whatsappSaleId) return;
       if (e.key === 'F1') {
         e.preventDefault();
         searchInputRef.current?.focus();
@@ -228,7 +231,7 @@ export default function Pos() {
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cart, customer, cartDiscount, payments, terminalId, selectedProductId]);
+  }, [cart, customer, cartDiscount, payments, terminalId, selectedProductId, completed, whatsappSaleId]);
 
   if (!canSell) {
     return (
@@ -357,6 +360,7 @@ export default function Pos() {
                 )}
                 <span className="figure font-medium text-ink">{Number(s.total).toFixed(2)}</span>
                 <div className="flex gap-3">
+                  <button onClick={() => setWhatsappSaleId(s.id)} className="text-xs font-medium text-ledger-600 hover:text-ledger-700">WhatsApp</button>
                   {canProcessReturns && s.status !== 'RETURNED' && (
                     <button
                       onClick={() => setReturningSaleId(s.id)}
@@ -379,15 +383,18 @@ export default function Pos() {
         </div>
       )}
 
-      {completed && (
+      {completed && !whatsappSaleId && (
         <SaleCompleteModal
           sale={completed.sale}
           changeDue={completed.changeDue}
           loyaltyPointsEarned={completed.loyaltyPointsEarned}
           printerMode={settings['pos.printerMode'] ?? 'browser'}
           onClose={() => setCompleted(null)}
+          onWhatsApp={() => setWhatsappSaleId(completed.sale.id)}
         />
       )}
+
+      {whatsappSaleId && <WhatsAppReceiptModal key={whatsappSaleId} saleId={whatsappSaleId} onClose={() => setWhatsappSaleId(null)} />}
 
       {returningSaleId && (
         <ReturnFormModal

@@ -11,9 +11,10 @@ interface Props {
   loyaltyPointsEarned: number;
   printerMode: string;
   onClose: () => void;
+  onWhatsApp: () => void;
 }
 
-export function SaleCompleteModal({ sale, changeDue, loyaltyPointsEarned, printerMode, onClose }: Props) {
+export function SaleCompleteModal({ sale, changeDue, loyaltyPointsEarned, printerMode, onClose, onWhatsApp }: Props) {
   const [printStatus, setPrintStatus] = useState<string | null>(null);
   const [isPrinting, setIsPrinting] = useState(false);
 
@@ -87,6 +88,7 @@ export function SaleCompleteModal({ sale, changeDue, loyaltyPointsEarned, printe
         </p>
       )}
 
+      <button onClick={onWhatsApp} className="mt-4 w-full rounded-md border border-ledger-600 px-4 py-2 text-sm font-semibold text-ledger-700 hover:bg-ledger-50">Send on WhatsApp</button>
       <div className="mt-4 flex gap-2">
         <button
           onClick={handlePrint}
